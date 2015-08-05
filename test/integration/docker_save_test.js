@@ -8,6 +8,7 @@ import https from 'https';
 import request from 'superagent-promise';
 import tar from 'tar-fs';
 import TestWorker from '../testworker';
+import through from 'through';
 import waitForEvent from '../../lib/wait_for_event';
 import Debug from 'debug';
 
@@ -53,35 +54,31 @@ suite('use docker-save', () => {
     res.pipe(fs.createWriteStream('/tmp/dockerload.tar'));
     await waitForEvent(res, 'end');
     //make sure it finishes unzipping
-    await base.testing.sleep(1000);
+    await base.testing.sleep(2000);
 
+    debug('downloaded');
     let docker = new Docker(dockerOpts());
-    let imageName = 'task/' + taskId + '/' + runId + ':latest';
+    let imageName = 'task-' + taskId + '-' + runId;
     await docker.loadImage('/tmp/dockerload.tar');
-    let opts = {
-      AttachStdin: true,
-      AttachStdout: true,
-      AttachStderr: true,
-      Cmd: ['cat', '/tmp/test.log'],
-      Image: imageName
-    };
-    let streamOpts = {
-      logs: true,
-      stdout: true,
-    };
-    let container = await docker.createContainer(opts);
-    await container.start();
-    let stream = await container.attach(streamOpts);
-    let finished = false;
-    stream.on('data', (data) => {
-      assert(data.compare(new Buffer(0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x0b, //header
-        0x74,0x65,0x73,0x74,0x53,0x74,0x72,0x69,0x6e,0x67,0x0a))); //testString\n
-      finished = true;
+    debug('loaded');
+    let image = docker.getImage(imageName);
+    let stream = through();
+    debug('before run')
+    await docker.run(image,  ['cat', '/tmp/test.log'], stream);
+    debug('run');
+    await new Promise((accept, reject) => {
+      stream.on('data', (data) => {
+        assert(data.compare(new Buffer(0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x0b, //header
+          0x74,0x65,0x73,0x74,0x53,0x74,0x72,0x69,0x6e,0x67,0x0a))); //testString\n
+        accept();
+      });
+      stream.on('error', reject);
+      setTimeout(reject, 20000, new Error('timed out waiting for docker container'));
     });
-    await base.testing.sleep(5000);
-    assert(finished, 'did not receive any data back');
-    await Promise.all([container.remove(), fs.unlink('/tmp/dockerload.tar')]);
-    await docker.getImage(imageName).remove();
+
+    //we don't care if it's already stopped, but we need it to be stopped before remove
+    // await Promise.all([container.remove(), fs.unlink('/tmp/dockerload.tar')]);
+    await image.remove();
   });
 
   test('run cacheSave, then check contents', async () => {
